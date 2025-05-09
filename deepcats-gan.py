@@ -515,7 +515,7 @@ encoder_decoder = memory_efficient_fusion(AutoencoderWrapper(torch.nn.Sequential
 # target_log_delta_square = math.log(1e-4)
 # lr_update_rate = 0.01
 
-for i in range(1000001):
+for i in range(100001):
     collectImgs()
     loss3 = discriminator_trace(static_datatape)
     loss3.backward()
