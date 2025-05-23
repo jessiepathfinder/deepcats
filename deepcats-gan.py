@@ -8,6 +8,7 @@ from PIL import Image
 from torchvision import tv_tensors
 from torchvision.utils import save_image
 from functorch.compile import memory_efficient_fusion, aot_module,min_cut_rematerialization_partition,ts_compile
+#from torchvision.transforms import Resize,InterpolationMode
 
 
 cuda = torch.device('cuda')
@@ -221,7 +222,14 @@ sqrt2 = math.sqrt(2.0)
 
 
 
+class VariancePreservingForceDropout2D(torch.nn.Module):
+    def __init__(self,dropout=0.5):
+        super().__init__()
+        self.dropout = 1.0 - dropout
+        self.donorm = math.sqrt(1.0 - dropout)
 
+    def forward(self, input):
+        return input.mul(torch.rand(list(input.size()[:-2]) + [1,1],dtype=input.dtype,device=input.device).bernoulli_(self.dropout).div_(self.donorm))
 
 
         
@@ -242,21 +250,7 @@ class SelfAttentionThing(torch.nn.Module):
         x = x.transpose(-1,-3)
         return torch.cat([input,x],-3).to(memory_format=torch.channels_last)
 
-class AugmentKernel(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
 
-    def forward(self, input):
-        p = torch.nn.functional.pad(input,(1,1,1,1),'replicate')
-        return torch.cat([p,torch.nn.functional.avg_pool2d(p,3,padding=1,stride=1),
-        torch.nn.functional.max_pool2d(torch.nn.functional.pad(torch.cat([input,input.neg()],-3), (2,2,2,2), value=(-math.inf)),3,stride=1)],-3)
-
-class Normalize(torch.nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def forward(self, input):
-        return input.div(input.mul(input).mean(-1,keepdim=True).sqrt())
 
 class FastAdaBelief:
     def __init__(self,parameters,lr=1e-8,beta1=0.9,beta2=0.999,epsilon = 1e-6,sadam_fallback = False):
@@ -288,6 +282,47 @@ class FastAdaBelief:
                 exp_avg_sq.add_(grad)
                 grad = None
                 parameter.addcdiv_(exp_avg,exp_avg_sq.add(epsilon),value=nlr)
+
+class BiasLayer(torch.nn.Module):
+    def __init__(self,size):
+        super().__init__()
+        self.bias = torch.nn.Parameter(torch.zeros(size))
+
+    def forward(self, input):
+        return input.add(self.bias)
+            
+class HalfNormInstance2D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return input.sub(input.mean((-1,-2),keepdim=True))
+
+class WeightNormLayer2D(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return input.div(input.mul(input).mean((-1,-2,-3),keepdim=True).sqrt())
+
+class NSplit(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return torch.cat([input,input.neg()],-3)
+
+class PolynomialKernelTrick(torch.nn.Module):
+    def __init__(self,howmuch : int):
+        super().__init__()
+        self.howmuch = howmuch
+    def forward(self,input):
+        queue = [input]
+        y = input
+        for x in range(self.howmuch):
+            y = y.mul(input)
+            queue.append(y)
+        return torch.cat(queue,-3)
             
 
 
@@ -299,12 +334,13 @@ arluv2_mod_dropout = torch.jit.script(ArLUv2(0.25))
 sqrt12 = math.sqrt(12)
 
 
+        
 
 
 discriminator = torch.nn.Sequential(
-AugmentKernel(),
-convinit3nb(biasinit(torch.nn.Conv2d(12,128,4,stride=2)),16),arluv2_mod_dropout,
-convinit3nb(biasinit(torch.nn.Conv2d(256,256,4,padding=1,stride=2)),16),arluv2_mod_dropout,
+PolynomialKernelTrick(3),
+convinit3nb(biasinit(torch.nn.Conv2d(12,128,4,stride=2,padding=1,padding_mode="replicate")),16),arluv2_mod_dropout,
+convinit3nb(biasinit(torch.nn.Conv2d(256,256,4,stride=2,padding=1)),16),arluv2_mod_dropout,
 convinit3nb(biasinit(torch.nn.Conv2d(512,512,4,padding=1,stride=2)),16),arluv2_mod_dropout,
 convinit3nb(biasinit(torch.nn.Conv2d(1024,1024,4,padding=1,stride=2)),16),arluv2_mod_dropout,
 Transpose(-3,-1),Transpose(-2,-1),torch.nn.Flatten(-3,-1),
@@ -327,56 +363,35 @@ fdinitgain = 1.0 / 5.0
 generator_gain = 1.48663410298
 attn_query_gain = 1.0 / 0.90747
 
+fdo_mod = torch.jit.script(VariancePreservingForceDropout2D(0.25))
+fastblur_mod = torch.nn.AvgPool2d(2,stride=1)
+
 
 generator = torch.nn.Sequential(
     ConstantMul(0.90747),
-    makekaiminglinear(4096,4096),arctan_mod,
-    makekaiminglinear(4096,4096),arctan_mod,
-    makekaiminglinear(4096,16384),arctan_mod,
-    torch.nn.Unflatten(-1, (4,4,1024)),Transpose(-3,-1),Transpose(-2,-1),
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,
-    convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(128,3,4,padding=1,stride=2)),4,gain=generator_gain),
-    ConstantDiv(0.90747)
+    makekaiminglinear(4096,4096,gain=generator_gain),arctan_mod,
+    makekaiminglinear(4096,4096,gain=generator_gain),arctan_mod,
+    makekaiminglinear(4096,16384,gain=generator_gain),arctan_mod,
+    torch.nn.Unflatten(-1, (4,4,1024)),Transpose(-3,-1),Transpose(-2,-1),fdo_mod,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,fdo_mod,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,fdo_mod,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,fdo_mod,
+    convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,
+    convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,WeightNormLayer2D(),
+    convinit3nb(torch.nn.Conv2d(128,12,4,padding=2,bias=False),16),torch.nn.PixelShuffle(2),fastblur_mod,fastblur_mod,BiasLayer((3,1,1))
 )
 
 
 
-generator.load_state_dict(torch.load("models/decoder_100000", weights_only=True))
-
-encoder = torch.nn.Sequential(
-ConstantMul(0.90747),
-AugmentKernel(),
-convinit3nb(biasinit(torch.nn.Conv2d(12,128,4,stride=2)),16,gain=generator_gain),arctan_mod,
-convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,SelfAttentionThing(128,attn_query_gain),
-convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,
-convinit3nb(biasinit(torch.nn.Conv2d(128,256,4,padding=1,stride=2)),16,gain=generator_gain),arctan_mod,
-convinit3nb(biasinit(torch.nn.Conv2d(256,512,4,padding=1,stride=2)),16,gain=generator_gain),arctan_mod,
-convinit3nb(biasinit(torch.nn.Conv2d(512,1024,4,padding=1,stride=2)),16,gain=generator_gain),arctan_mod,
-Transpose(-3,-1),Transpose(-2,-1),torch.nn.Flatten(-3,-1),
-makekaiminglinear(16384,4096,gain=generator_gain),arctan_mod,
-makekaiminglinear(4096,4096,gain=generator_gain),arctan_mod,Normalize(),
-makekaiminglinear(4096,4096)
-)
-encoder.load_state_dict(torch.load("models1/encoder_100000", weights_only=True))
-
-for x in encoder.parameters():
-    x.requires_grad_(False)
 
 discriminator.train(True)
 generator.train(False)
-generator_trace = torch.jit.trace(generator,torch.empty(batchSize,4096))
+generator_trace = torch.jit.trace(generator,torch.empty(batchSize,4096),check_trace=False)
 
 
 discriminator_trace = memory_efficient_fusion(torch.nn.Sequential(FlipAugment(),discriminator,mean_mod))
@@ -393,7 +408,6 @@ generator.train(False)
 
 
 
-testrand = torch.randn(1,4096)
 
 filelist = []
 
@@ -408,10 +422,10 @@ filecount = len(filelist) - 1
 
 
 
-#generator_optimizer = torch.optim.Adam(generator.parameters(),lr=1e-5,eps=1e-9)
-generator_optimizer = FastAdaBelief(generator.parameters(),lr=1e-7,epsilon=0.0000670167481201,sadam_fallback=True)
-#generator_optimizer = adabelief_pytorch.AdaBelief(generator.parameters(),lr=1e-6,degenerated_to_sgd=False,eps=1e-9,weight_decouple=False,rectify=False,print_change_log=False)
-discriminator_optimizer = FastAdaBelief(discriminator.parameters(),lr=1e-7,epsilon=0.0000670167481201)
+generator_optimizer = torch.optim.Adam(generator.parameters(),lr=1e-5,eps=1e-9)
+#generator_optimizer = FastAdaBelief(generator.parameters(),lr=1e-7,epsilon=8.13802083e-5,sadam_fallback=True)
+discriminator_optimizer = adabelief_pytorch.AdaBelief(discriminator.parameters(),lr=1e-4,degenerated_to_sgd=False,eps=1e-9,weight_decouple=False,rectify=False,print_change_log=False)
+#discriminator_optimizer = FastAdaBelief(discriminator.parameters(),lr=1e-7,epsilon=8.13802083e-5)
 
 
 
@@ -499,14 +513,8 @@ class GradientPenaltyDiscriminator(torch.nn.Module):
         return graddx
 gradient_penalty_discriminator = aot_module(GradientPenaltyDiscriminator(discriminator),fw_compiler=ts_compile,bw_compiler=ts_compile, partition_fn=min_cut_rematerialization_partition)
 
-class AutoencoderWrapper(torch.nn.Module):
-    def __init__(self,module):
-        super().__init__()
-        self.module = module
-    def forward(self,x):
-        return torch.nn.functional.l1_loss(self.module.forward(x),x)
 
-encoder_decoder = memory_efficient_fusion(AutoencoderWrapper(torch.nn.Sequential(encoder,generator)))
+
 
 
 
@@ -529,7 +537,7 @@ for i in range(100001):
     print("Batch #" + str(i) + " discriminator gradient penalty: " + str(gradientPenalty.tolist()))
     
     discriminator_optimizer.step()
-    #discriminator_optimizer.zero_grad(set_to_none=True)
+    discriminator_optimizer.zero_grad(set_to_none=True)
     
     
     
@@ -549,14 +557,10 @@ for i in range(100001):
     loss1.backward()
     
     print("Batch #" + str(i) + " generator Wasserstein loss: " + str(loss1.tolist()))
-    
-    
-    loss4 = encoder_decoder.forward(static_datatape)
-    loss4.mul(gpw).backward()
-    print("Batch #" + str(i) + " generator divergence penalty: " + str(loss4.tolist()))
+    dumpgrad(generator)
     
     generator_optimizer.step()
-    #generator_optimizer.zero_grad(set_to_none=True)
+    generator_optimizer.zero_grad(set_to_none=True)
     
     
     
@@ -571,11 +575,11 @@ for i in range(100001):
     
     if i % 100 == 0:
         with torch.no_grad():
-            save_image(generator.forward(testrand).div_(sqrt12).add_(0.5).squeeze(0), "fakecats/cat" + str(i) + ".png")
+            save_image(generator.forward(torch.randn(1,4096)).div_(sqrt12).add_(0.5).squeeze(0), "fakecats/cat" + str(i) + ".png")
         if i % 10000 == 0:
             torch.save(generator.state_dict(),"models/generator_" + str(i))
             #torch.save(generator_optimizer.state_dict(),"models/generator_optimizer_" + str(i))
-            torch.save(discriminator.state_dict(),"models/discriminator_" + str(i))
+            #torch.save(discriminator.state_dict(),"models/discriminator_" + str(i))
             #torch.save(discriminator_optimizer.state_dict(),"models/discriminator_optimizer_" + str(i))
 
     
