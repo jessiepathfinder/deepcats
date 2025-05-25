@@ -350,7 +350,7 @@ generator = torch.nn.Sequential(
     convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),arctan_mod,WeightNormLayer2D(),
     convinit3nb(torch.nn.Conv2d(128,12,4,padding=2,bias=False),16),torch.nn.PixelShuffle(2),fastblur_mod,fastblur_mod,BiasLayer((3,1,1))
 )
-generator.load_state_dict(torch.load("generator_100000", weights_only=True))
+generator.load_state_dict(torch.load("models/generator_100000", weights_only=True))
 
 imgss = generator.forward(torch.randn(256,4096)).div_(sqrt12).add_(0.5)
 
