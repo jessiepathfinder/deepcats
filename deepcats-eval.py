@@ -227,18 +227,26 @@ sqrt2 = math.sqrt(2.0)
 
 
         
-class SelfAttentionThing(torch.nn.Module):
-    def __init__(self,size,gain):
+class SelfAttentionThingV2(torch.nn.Module):
+    def __init__(self,size):
         super().__init__()
-        gain /= math.sqrt(size)
-        self.keys = torch.nn.Parameter(torch.randn(size,size).mul_(gain))
-        self.queries = torch.nn.Parameter(torch.randn(size,size).mul_(gain))
+        gain = math.sqrt(size)
+        self.keys = torch.nn.Parameter(torch.randn(size,size).div_(gain))
+        self.queries = torch.nn.Parameter(torch.randn(size,size).div_(gain))
 
     def forward(self, input):
         x = input.transpose(-1,-3)
         x = x.flatten(-3,-2)
+        
+        x1 = x.unsqueeze(-3)
+
+        x = x.div(x.mul(x).mean((-2,-1),keepdim=True).sqrt())
+        
         x = x.unsqueeze(-3)
-        x = torch.nn.functional.scaled_dot_product_attention(x.matmul(self.queries), x.matmul(self.keys),x)
+        (x,y) = (x.matmul(self.queries), x.matmul(self.keys))
+        x = torch.nn.functional.scaled_dot_product_attention(x,y,x1)
+        x1 = None
+        y = None
         x = x.squeeze(-3)
         x = x.unflatten(-2,input.size()[-2:])
         x = x.transpose(-1,-3)
@@ -297,6 +305,7 @@ class BiasLayer(torch.nn.Module):
     def forward(self, input):
         return input.add(self.bias)
 
+
 fdo_mod = torch.jit.script(VariancePreservingForceDropout2D(0.25))
 
 arluv2_mod = ArLUv2(0.0)
@@ -326,24 +335,22 @@ attn_query_gain = 1.0 / 0.90747
 fastblur_mod = torch.nn.AvgPool2d(2,stride=1)
 
 generator = torch.nn.Sequential(
-    ConstantMul(0.90747),
-    makekaiminglinear(4096,4096,gain=generator_gain),arctan_mod,
-    makekaiminglinear(4096,4096,gain=generator_gain),arctan_mod,
-    makekaiminglinear(4096,16384,gain=generator_gain),arctan_mod,
+    makekaiminglinear(4096,4096),arctan_mod,
+    makekaiminglinear(4096,4096),arctan_mod,
+    makekaiminglinear(4096,16384),arctan_mod,
     torch.nn.Unflatten(-1, (4,4,1024)),Transpose(-3,-1),Transpose(-2,-1),fdo_mod,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,fdo_mod,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,fdo_mod,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4,gain=generator_gain),arctan_mod,fdo_mod,
-    convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,
-    convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,fdo_mod,SelfAttentionThing(128,attn_query_gain),
-    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9,gain=generator_gain),arctan_mod,WeightNormLayer2D(),
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4),arctan_mod,fdo_mod,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4),arctan_mod,fdo_mod,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4),arctan_mod,fdo_mod,
+    convinit3nb(biasinit(torch.nn.Conv2d(128,128,3,padding=1)),9),arctan_mod,fdo_mod,SelfAttentionThingV2(128),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),arctan_mod,fdo_mod,SelfAttentionThingV2(128),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),arctan_mod,fdo_mod,SelfAttentionThingV2(128),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),arctan_mod,fdo_mod,SelfAttentionThingV2(128),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),arctan_mod,fdo_mod,SelfAttentionThingV2(128),
+    convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),arctan_mod,WeightNormLayer2D(),
     convinit3nb(torch.nn.Conv2d(128,12,4,padding=2,bias=False),16),torch.nn.PixelShuffle(2),fastblur_mod,fastblur_mod,BiasLayer((3,1,1))
 )
-generator.load_state_dict(torch.load("models/generator_100000", weights_only=True))
+generator.load_state_dict(torch.load("generator_100000", weights_only=True))
 
 imgss = generator.forward(torch.randn(256,4096)).div_(sqrt12).add_(0.5)
 
@@ -365,4 +372,4 @@ imgss = imgss.transpose(1,2)
 imgss = imgss.flatten(2,3)
 #[c,x,y]
 
-save_image(imgss, "fakecats.png")
+save_image(imgss, "fakecats4.png")
