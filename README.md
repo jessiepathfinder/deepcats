@@ -1,6 +1,6 @@
 # Deepcats: a WGAN-GP model trained to generate images of cats
 
-![image](https://github.com/user-attachments/assets/1cd83086-7571-4563-aa73-3a6ad476e9d0)
+![image](https://github.com/user-attachments/assets/9dffe1b3-7557-4083-8b3b-b46dbd34789b)
 
 
 
