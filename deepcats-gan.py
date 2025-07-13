@@ -18,6 +18,7 @@ torch.set_default_dtype(torch.float32)
 torch.backends.cuda.matmul.allow_tf32 = True
 torch.backends.cudnn.allow_tf32 = True
 
+
 class Arctan(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -256,9 +257,25 @@ class NormLayer2d(torch.nn.Module):
 
     def forward(self, input):
         return input.div(input.mul(input).mean((-1,-2,-3),keepdim=True).sqrt())
+        
+class ResBlock(torch.nn.Module):
+    def __init__(self,siz):
+        super().__init__()
+        self.i = biasinit(convinit3nb(torch.nn.Conv2d(siz,siz,3,padding=2),9))
+        self.o = biasinit(convinit3nb(torch.nn.Conv2d(siz,siz,3),9))
+        self.do = fdo_mod
+        self.no = norm_layer
+    def forward(self,input):
+        return input.add(self.o.forward(self.no.forward(self.do.forward(self.i.forward(input).atan()))))
+
+
+
+norm_layer = NormLayer2d()
+
+
 
 norm_layer_1 = NormLayer()
-norm_layer = NormLayer2d()
+
 
 sqrt12 = math.sqrt(12)
 
@@ -275,12 +292,13 @@ discriminator = ForkAdd(
     torch.nn.Sequential(
         PolynomialKernelTrick(5),
         convinit3nb(biasinit(torch.nn.Conv2d(18,128,3)),9),arctan_mod,
+
         convinit3nb(biasinit(torch.nn.Conv2d(128,128,4,stride=2,padding=2)),16),softplusv2_mod,
         convinit3nb(biasinit(torch.nn.Conv2d(256,256,4,stride=2,padding=1)),16),softplusv2_mod,
         convinit3nb(biasinit(torch.nn.Conv2d(512,512,4,padding=1,stride=2)),16),softplusv2_mod,
         convinit3nb(biasinit(torch.nn.Conv2d(1024,1024,4,padding=1,stride=2)),16),softplusv2_mod,
         Transpose(-3,-1),Transpose(-2,-1),torch.nn.Flatten(-3,-1),
-        makekaiminglinear2(32768,1,False),ConstantDiv(math.sqrt(32768))
+        makekaiminglinear2(32768,1,False),ConstantDiv(math.sqrt(32768*2))        
     ),
     torch.nn.Sequential(
         torch.nn.AvgPool2d(2),
@@ -290,7 +308,7 @@ discriminator = ForkAdd(
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
-        makekaiminglinear2(6144,1,False),ConstantDiv(math.sqrt(6144))
+        makekaiminglinear2(6144,1,False),ConstantDiv(math.sqrt(6144*2))
     )
 )
 
@@ -317,15 +335,18 @@ attn_query_gain = 1.0
 generator = torch.nn.Sequential(
     makekaiminglinear(4096,4096),arctan_mod,fdo_mod_1,norm_layer_1,
     makekaiminglinear(4096,4096),arctan_mod,fdo_mod_1,norm_layer_1,
-    makekaiminglinear(4096,16384),arctan_mod,fdo_mod_1,norm_layer_1,
+    makekaiminglinear(4096,16384),arctan_mod,
     torch.nn.Unflatten(-1, (4,4,1024)),Transpose(-3,-1),Transpose(-2,-1),fdo_mod,norm_layer,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4),arctan_mod,fdo_mod,norm_layer,
-    convinit3nb(torch.nn.Conv2d(512,512,3,padding=1),9),arctan_mod,fdo_mod,norm_layer,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4),arctan_mod,fdo_mod,norm_layer,
-    convinit3nb(torch.nn.Conv2d(256,256,3,padding=1),9),arctan_mod,fdo_mod,norm_layer,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4),arctan_mod,fdo_mod,norm_layer,
-    convinit3nb(torch.nn.Conv2d(128,128,3,padding=1),9),arctan_mod,fdo_mod,norm_layer,
-    convinit3nb(torch.nn.Conv2d(128,12,3,padding=1,bias=False),9),torch.nn.PixelShuffle(2),BiasLayer((3,1,1)),ConstantDiv(sqrt2)
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4),arctan_mod,norm_layer,
+    ResBlock(512),norm_layer,
+    ResBlock(512),norm_layer,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4),arctan_mod,norm_layer,
+    ResBlock(256),norm_layer,
+    ResBlock(256),norm_layer,
+    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4),arctan_mod,norm_layer,
+    ResBlock(128),norm_layer,
+    ResBlock(128),norm_layer,
+    convinit3nb(torch.nn.Conv2d(128,12,3,padding=1,bias=False),9),torch.nn.PixelShuffle(2),BiasLayer((3,1,1))
 )
 
 l2_regularization = 0.01
@@ -514,7 +535,10 @@ for i in range(200001):
         for x in discriminator.parameters():
             if(x.dim() < 2):
                 continue
-            x.grad.add_(x,alpha=l2_regularization)
+            l2z = l2_regularization
+            if x.size(0) == 1:
+                l2z /= math.sqrt(x.size(1))
+            x.grad.add_(x,alpha=l2z)
     discriminator_optimizer.step()
     discriminator_optimizer.zero_grad(set_to_none=True)
     
