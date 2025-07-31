@@ -115,6 +115,14 @@ class Softplusv2_flat(torch.nn.Module):
     def forward(self, input):
         return torch.nn.functional.softplus(torch.cat([input,input.neg()],-1))
 
+class ReLUv2(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, input):
+        return torch.cat([input,input.neg()],-3).relu()
+reluv2_mod = ReLUv2()
+
 class ForceDropout2D(torch.nn.Module):
     def __init__(self,dropout=0.5):
         super().__init__()
@@ -133,6 +141,8 @@ class ForceDropout(torch.nn.Module):
 
     def forward(self, input):
         return input.mul(torch.rand_like(input).bernoulli_(self.dropout))
+
+
 
 softplus_mod = torch.nn.Softplus()
 fdo_mod = torch.jit.script(ForceDropout2D(0.125))
@@ -190,6 +200,8 @@ def convinitmanualuniform(layer,gain=1.0):
 def convinit2nb(layer,m=4,gain=1.0):
     torch.nn.init.normal_(layer.weight,0.0,gain / math.sqrt(layer.weight.size()[0] * m))
     return layer.to(memory_format=torch.channels_last)
+
+
 
 def convinit3nb(layer,m=4,gain=1.0):
     torch.nn.init.normal_(layer.weight,0.0,gain / math.sqrt(layer.weight.size()[1] * m))
@@ -250,6 +262,15 @@ class NormLayer(torch.nn.Module):
 
     def forward(self, input):
         return input.div(input.mul(input).mean((-1),keepdim=True).sqrt())
+
+class HalfNormLayer(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+
+    def forward(self, input):
+        return input.sub(input.mean((-1),keepdim=True))
+
 class NormLayer2d(torch.nn.Module):
     def __init__(self):
         super().__init__()
@@ -257,24 +278,54 @@ class NormLayer2d(torch.nn.Module):
 
     def forward(self, input):
         return input.div(input.mul(input).mean((-1,-2,-3),keepdim=True).sqrt())
-        
-class ResBlock(torch.nn.Module):
-    def __init__(self,siz):
-        super().__init__()
-        self.i = biasinit(convinit3nb(torch.nn.Conv2d(siz,siz,3,padding=2),9))
-        self.o = biasinit(convinit3nb(torch.nn.Conv2d(siz,siz,3),9))
-        self.do = fdo_mod
-        self.no = norm_layer
-    def forward(self,input):
-        return input.add(self.o.forward(self.no.forward(self.do.forward(self.i.forward(input).atan()))))
-
-
 
 norm_layer = NormLayer2d()
-
-
-
 norm_layer_1 = NormLayer()
+half_norm = HalfNormLayer()
+
+
+class InstanceNoise(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+
+    def forward(self, input):
+        return input.add(torch.randn_like(input),alpha=0.125)
+class RSn(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+
+    def forward(self, input):
+        return input.mul(input).sum(-1,keepdim=True).div(input.size(-1)*3).sqrt()
+
+class GatedActivation(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+
+    def forward(self, input):
+        s = input.size(-3) // 2
+        input = input.transpose(-3,0)
+        x = input[:s]
+        y = input[s:]
+        input = None
+        x = x.sigmoid()
+        y = y.atan()
+        x = x.mul(y)
+        y = None
+        x = x.transpose(-3,0)
+        return x.to(memory_format=torch.channels_last)
+
+class ECL(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+        
+
+    def forward(self, input):
+        return input.to(memory_format=torch.channels_last)
+
+ga = GatedActivation()
 
 
 sqrt12 = math.sqrt(12)
@@ -284,41 +335,38 @@ sqrt12 = math.sqrt(12)
 softplusv2_mod = Softplusv2()
 softplusv2_flat_mod = Softplusv2_flat()
 
-fastblur_mod = torch.nn.AvgPool2d(2,stride=1)
 
 
+#fg = 1.0 / math.sqrt(3)
 
-discriminator = ForkAdd(
+discriminator = torch.nn.Sequential(InstanceNoise(),ForkAdd(
     torch.nn.Sequential(
         PolynomialKernelTrick(5),
-        convinit3nb(biasinit(torch.nn.Conv2d(18,128,3)),9),arctan_mod,
-
+        convinit3nb(biasinit(torch.nn.Conv2d(18,256,3)),9),ga,ECL(),norm_layer,
         convinit3nb(biasinit(torch.nn.Conv2d(128,128,4,stride=2,padding=2)),16),softplusv2_mod,
+        convinit3nb(biasinit(torch.nn.Conv2d(256,128,3,padding=1)),9),softplusv2_mod,
         convinit3nb(biasinit(torch.nn.Conv2d(256,256,4,stride=2,padding=1)),16),softplusv2_mod,
+        convinit3nb(biasinit(torch.nn.Conv2d(512,256,3,padding=1)),9),softplusv2_mod,
         convinit3nb(biasinit(torch.nn.Conv2d(512,512,4,padding=1,stride=2)),16),softplusv2_mod,
+        convinit3nb(biasinit(torch.nn.Conv2d(1024,512,3,padding=1)),9),softplusv2_mod,
         convinit3nb(biasinit(torch.nn.Conv2d(1024,1024,4,padding=1,stride=2)),16),softplusv2_mod,
+        #SMART TRANSPOSE because we are channels-last and we want to avoid copying
         Transpose(-3,-1),Transpose(-2,-1),torch.nn.Flatten(-3,-1),
-        makekaiminglinear2(32768,1,False),ConstantDiv(math.sqrt(32768*2))        
+        makekaiminglinear(32768,1,False,gain=1.0/sqrt2)
     ),
+    
     torch.nn.Sequential(
         torch.nn.AvgPool2d(2),
+        #SMART TRANSPOSE because we are channels-last and we want to avoid copying
         Transpose(-3,-1),Transpose(-2,-1),torch.nn.Flatten(-3,-1),
         makekaiminglinear(3072,3072),softplusv2_flat_mod,
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
         makekaiminglinear(6144,3072),softplusv2_flat_mod,
-        makekaiminglinear2(6144,1,False),ConstantDiv(math.sqrt(6144*2))
+        makekaiminglinear(6144,1,False,gain=1.0/sqrt2)
     )
-)
-
-
-
-
-
-fdinitgain = 1.0 / 5.0
-
-
+))
 
 
 
@@ -326,30 +374,26 @@ fdinitgain = 1.0 / 5.0
 
 
 
-attn_query_gain = 1.0
+l2_regularization = 0.01
 
 
 
-
+px = torch.nn.PixelShuffle(2)
+fastblur_mod = torch.nn.AvgPool2d(2,stride=1)
 
 generator = torch.nn.Sequential(
-    makekaiminglinear(4096,4096),arctan_mod,fdo_mod_1,norm_layer_1,
-    makekaiminglinear(4096,4096),arctan_mod,fdo_mod_1,norm_layer_1,
-    makekaiminglinear(4096,16384),arctan_mod,
-    torch.nn.Unflatten(-1, (4,4,1024)),Transpose(-3,-1),Transpose(-2,-1),fdo_mod,norm_layer,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(1024,512,4,padding=1,stride=2)),4),arctan_mod,norm_layer,
-    ResBlock(512),norm_layer,
-    ResBlock(512),norm_layer,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(512,256,4,padding=1,stride=2)),4),arctan_mod,norm_layer,
-    ResBlock(256),norm_layer,
-    ResBlock(256),norm_layer,
-    convinit2nb(biasinit(torch.nn.ConvTranspose2d(256,128,4,padding=1,stride=2)),4),arctan_mod,norm_layer,
-    ResBlock(128),norm_layer,
-    ResBlock(128),norm_layer,
-    convinit3nb(torch.nn.Conv2d(128,12,3,padding=1,bias=False),9),torch.nn.PixelShuffle(2),BiasLayer((3,1,1))
+    makekaiminglinear(4096,4096),arctan_mod,half_norm,norm_layer_1,
+    makekaiminglinear(4096,4096),arctan_mod,half_norm,norm_layer_1,
+    makekaiminglinear(4096,4096),arctan_mod,half_norm,norm_layer_1,
+    makekaiminglinear(4096,32768),
+    #SMART TRANSPOSE because we are channels-last and we want to avoid copying
+    torch.nn.Unflatten(-1, (4,4,2048)),Transpose(-3,-1),Transpose(-2,-1),ga,fdo_mod,norm_layer, #4x4
+    convinit3nb(biasinit(torch.nn.Conv2d(1024,4096,3,padding=1)),9),px,ga,fdo_mod,norm_layer, #8x8
+    convinit3nb(biasinit(torch.nn.Conv2d(512,2048,3,padding=1)),9),px,ga,fdo_mod,norm_layer, #16x16
+    convinit3nb(biasinit(torch.nn.Conv2d(256,1024,3,padding=1)),9),px,ga,fdo_mod,norm_layer, #32x32
+    convinit3nb(torch.nn.Conv2d(128,12,4,padding=2,bias=False),16),px,ECL(),fastblur_mod,fastblur_mod,BiasLayer((3,1,1))
 )
 
-l2_regularization = 0.01
 
 
 discriminator.train(True)
@@ -360,6 +404,7 @@ generator_trace = torch.jit.trace(generator,torch.empty(batchSize,4096),check_tr
 fa_mod = FlipAugment()
 
 discriminator_trace = memory_efficient_fusion(torch.nn.Sequential(fa_mod,discriminator,mean_mod))
+discriminator_trace_1 = memory_efficient_fusion(torch.nn.Sequential(discriminator,sum_mod))
 
 generator.train(True)
 discriminator.train(False)
@@ -387,13 +432,13 @@ filecount = len(filelist) - 1
 
 
 
-generator_optimizer = torch.optim.Adam(generator.parameters(),lr=1e-5,eps=1e-9)
+generator_optimizer = torch.optim.Adam(generator.parameters(),lr=1e-6,eps=1e-9)
 #generator_optimizer = torch.optim.SGD(generator.parameters(),lr=1e-5,momentum=0.9)
-discriminator_optimizer = adabelief_pytorch.AdaBelief(discriminator.parameters(),lr=1e-4,degenerated_to_sgd=False,eps=1e-9,weight_decouple=False,rectify=False,print_change_log=False)
+#discriminator_optimizer = adabelief_pytorch.AdaBelief(discriminator.parameters(),lr=1e-4,degenerated_to_sgd=False,eps=1e-9,weight_decouple=False,rectify=False,print_change_log=False)
+discriminator_optimizer = torch.optim.Adam(discriminator.parameters(),lr=1e-5,eps=1e-9)
 
 
-
-gpw = math.sqrt(64*64*3)
+gpw = 64*64*3
 
 def bRandFlip(input : torch.Tensor):
     size = input.size(0)
@@ -472,15 +517,15 @@ def mkdfs():
         refrand.normal_(0.0,1.0)
         return generator_trace(refrand)
 
-gpw1 = math.sqrt(16*16*3)
 
-def interpolate1() -> torch.Tensor:
-    vec = torch.rand(batchSize,1,1,1)
-    return bRandFlip(bRandFlip(torch.nn.functional.avg_pool2d(mkdfs(),2,divisor_override=2)).mul_(vec).addcmul_(torch.nn.functional.avg_pool2d(static_datatape,2,divisor_override=2).div_(255/sqrt12).sub_(0.5*sqrt12),vec.sub_(1),value=-1))
+
+
+static_thing_2 = torch.empty(batchSize,3,1,1)
 
 def interpolate() -> torch.Tensor:
-    vec = torch.rand(batchSize,1,1,1)
-    return bRandFlip(bRandFlip(mkdfs()).mul_(vec).addcmul_(static_datatape,vec.sub_(1),value=-1))
+    static_thing_2.uniform_()
+    return bRandFlip(bRandFlip(mkdfs()).mul_(static_thing_2).addcmul_(static_datatape,static_thing_2.sub_(1),value=-1))
+
 
 #HACK: We create this special wrapper module around the discriminator
 #so we can compute & backpropagate the gradient penalty with AOT Autograd
@@ -501,8 +546,12 @@ class GradientPenaltyDiscriminator(torch.nn.Module):
         graddx = graddx.mul(graddx)
         graddx = graddx.sum((-1,-2,-3))
         graddx = graddx.sqrt()
+        #gx1 = graddx.log()
         graddx = graddx.sub(1.0)
+        graddx = graddx.relu()
         graddx = graddx.mul(graddx)
+        #graddx = graddx.addcmul(gx1,gx1)
+        #gx1 = None
         graddx = graddx.mean()
         return graddx
 
@@ -511,44 +560,35 @@ gradient_penalty_discriminator = aot_module(GradientPenaltyDiscriminator(discrim
 
 
 
-gpw2 = gpw * 2.0
-
-
-# maxlr = 1e-4
-# alr = 1e-6
-# target_log_delta_square = math.log(1e-4)
-# lr_update_rate = 0.01
-
-for i in range(200001):
+for i in range(300001):
     collectImgs()
     loss3 = discriminator_trace(static_datatape)
     loss3.backward()
     loss2 = discriminator_trace(mkdfs()).neg()
     loss2.backward()
-    print("Batch #" + str(i) + " discriminator Wasserstein loss: " + str(loss2.tolist() + loss3.tolist()))
+    dlo = loss2.tolist() + loss3.tolist()
+    print("Batch #" + str(i) + " discriminator Wasserstein loss: " + str(dlo))
     collectImgs()
     gradientPenalty = gradient_penalty_discriminator(interpolate())
-    gradientPenalty.mul(gpw).backward()
+    gp1 = gradientPenalty.tolist()
+    gb = gp1 > 0.0
+    if gb:
+        gradientPenalty.mul(gpw).backward()
+    gradientPenalty = None
     
-    print("Batch #" + str(i) + " discriminator gradient penalty: " + str(gradientPenalty.tolist()))
-    with torch.no_grad():
-        for x in discriminator.parameters():
-            if(x.dim() < 2):
-                continue
-            l2z = l2_regularization
-            if x.size(0) == 1:
-                l2z /= math.sqrt(x.size(1))
-            x.grad.add_(x,alpha=l2z)
+
+    
+    print("Batch #" + str(i) + " discriminator gradient penalty: " + str(gp1))
+    
+    
+
+            
+    
+
     discriminator_optimizer.step()
     discriminator_optimizer.zero_grad(set_to_none=True)
-    
-
-
-    
     for x in discriminator.parameters():
         x.requires_grad_(False)
-
-
     
     discriminator.train(False)
     generator.train(True)
@@ -559,18 +599,23 @@ for i in range(200001):
     print("Batch #" + str(i) + " generator Wasserstein loss: " + str(loss1.tolist()))
     
 
-    
+
+
     generator_optimizer.step()
     generator_optimizer.zero_grad(set_to_none=True)
     
-    
-    
-
-    print()
+        
+        
     generator.train(False)
     discriminator.train(True)
     for x in discriminator.parameters():
+        if x.dim() > 1:
+            #Post-step decoupled weight decay help us forget an old discriminator in a controlled manner without overshooting
+            x.mul_(0.99999)
         x.requires_grad_(True)
+
+    print()
+    
 
 
     
