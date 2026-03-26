@@ -1,6 +1,6 @@
 # Deepcats: a WGAN-GP model trained to generate images of cats
 
-![image](https://github.com/user-attachments/assets/9dffe1b3-7557-4083-8b3b-b46dbd34789b)
+<img width="1088" height="1088" alt="image" src="https://github.com/user-attachments/assets/85cbd917-04c2-4dde-bbaf-d4ccf69e4e4d" />
 
 
 
@@ -8,7 +8,7 @@
 Step 1: download dataset and extract to working directory: https://www.kaggle.com/datasets/crawford/cat-dataset
 NOTE that the working dir must NOT contain any images or subfolders that contain images
 
-Step 2: ```pip install torch torchvision functorch flash-attn adabelief-pytorch```
+Step 2: ```pip install torch torchvision functorch adabelief-pytorch```
 
 Step 3: create folders ```fakecats``` and ```models``` in working directory
 
